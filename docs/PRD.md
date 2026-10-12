@@ -4,7 +4,7 @@
 NoteForge AI helps students transform notes into concise summaries, practice quizzes, and review flashcards.
 
 ## Goals
-- Allow note input via paste or PDF/TXT upload.
+- Allow note input via paste or PDF, TXT, PNG, JPG, and JPEG upload.
 - Produce grounded summaries in multiple styles.
 - Generate quiz questions with answer validation and in-browser scoring.
 - Help users review weak topics and retain concepts with flashcards.
@@ -16,7 +16,7 @@ NoteForge AI helps students transform notes into concise summaries, practice qui
 
 ## Functional Requirements
 1. Accept title, subject, and source text.
-2. Extract readable text from uploaded PDFs and TXT.
+2. Extract readable text from uploaded PDFs and TXT, using OCR for scanned PDF pages and images.
 3. Generate summaries using AI when configured, with local fallback when not configured.
 4. Generate quiz questions with difficulty, question count, and type controls.
 5. Provide an interactive quiz flow with scoring based on the validated answer key.

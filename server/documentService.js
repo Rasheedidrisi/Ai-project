@@ -1,5 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
-import Tesseract from 'tesseract.js';
+import { createCanvas } from '@napi-rs/canvas';
+import Tesseract, { createWorker } from 'tesseract.js';
 
 function cleanText(text) {
   return String(text || '')
@@ -24,26 +25,45 @@ async function extractImageText(buffer) {
 }
 
 export async function extractPdfText(buffer) {
-  const pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
   const pages = [];
+  let ocrWorker;
 
-  for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-    const page = await pdf.getPage(pageNumber);
-    const textContent = await page.getTextContent();
-    const pageText = textContent.items
-      .map((item) => ('str' in item ? item.str : ''))
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
+  try {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      let pageText = textContent.items
+        .map((item) => ('str' in item ? item.str : ''))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
 
-    if (pageText) {
-      pages.push(pageText);
+      if (!pageText) {
+        ocrWorker ||= await createWorker('eng');
+        const viewport = page.getViewport({ scale: 1.5 });
+        const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+        await page.render({
+          canvasContext: canvas.getContext('2d'),
+          viewport,
+        }).promise;
+        const result = await ocrWorker.recognize(canvas.toBuffer('image/png'));
+        pageText = cleanText(result.data?.text || '');
+      }
+
+      if (pageText) {
+        pages.push(pageText);
+      }
+    }
+  } finally {
+    if (ocrWorker) {
+      await ocrWorker.terminate();
     }
   }
 
   const combined = cleanText(pages.join('\n\n'));
   if (!combined) {
-    throw new Error('This PDF appears to be scanned or image-based. Please upload a text PDF or a clear image of the notes.');
+    throw new Error('No readable text could be detected in this PDF. Please upload a clearer PDF or image.');
   }
 
   return combined;
