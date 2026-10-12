@@ -25,7 +25,7 @@ async function extractImageText(buffer) {
 }
 
 export async function extractPdfText(buffer) {
-  const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
+ const pdf = await pdfjsLib.getDocument({ data: new Uint8Array(buffer) }).promise;
   const pages = [];
   let ocrWorker;
 
