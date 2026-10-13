@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, NavLink, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { BookOpenText, BrainCircuit, Copy, FileText, FolderArchive, LibraryBig, LoaderCircle, Plus, Search, Sparkles, Trash2, Upload, Wand2, CheckCircle2, ClipboardCheck, XCircle, ArrowLeft, ArrowRight, RotateCcw, PenLine, Save, Brain, NotebookPen, BarChart3 } from 'lucide-react';
 import {
   generateFlashcardsRequest,
@@ -90,6 +90,8 @@ function App() {
 }
 
 function AppShell() {
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
   const [studySet, setStudySet] = useState(() => loadActiveSet() || defaultStudySet());
   const [library, setLibrary] = useState(() => loadLibrary());
   const [toast, setToast] = useState('');
@@ -106,6 +108,16 @@ function AppShell() {
   const [fileStatus, setFileStatus] = useState('');
   const fileInputRef = useRef(null);
   const activeSetOwnerRef = useRef('local');
+  const pageTitle = pathname === '/library' ? 'Saved study library' : pathname === '/cloud' ? 'Cloud operations' : 'Study workspace';
+  const pageDescription = pathname === '/library'
+    ? 'Your saved notes, summaries, quizzes, and flashcards'
+    : pathname === '/cloud'
+      ? 'Account sync and processing activity'
+      : 'Turn your notes into a focused study session';
+
+  useEffect(() => {
+    document.title = `${pageTitle} — NoteForge AI`;
+  }, [pageTitle]);
 
   useEffect(() => {
     if (!authReady) return;
@@ -242,6 +254,15 @@ function AppShell() {
 
   const handleNoteChange = (key, value) => {
     setStudySet((current) => ({ ...current, [key]: value, updatedAt: Date.now() }));
+  };
+
+  const handleCopySummary = async () => {
+    try {
+      await navigator.clipboard.writeText(studySet.summary || activeSummary);
+      setToast('Summary copied to clipboard.');
+    } catch {
+      setToast('Could not copy the summary. Check clipboard permissions and try again.');
+    }
   };
 
   const beginCloudProcessingRecord = async (jobType) => {
@@ -548,9 +569,9 @@ function AppShell() {
   return (
     <div className="min-h-screen bg-[var(--paper)] text-[var(--charcoal)]">
       <div className="mx-auto flex max-w-[1600px] gap-6 px-4 py-6 lg:px-8">
-        <aside className="hidden w-72 shrink-0 rounded-3xl border border-[var(--line)] bg-[var(--surface)] p-5 shadow-[0_18px_40px_rgba(37,40,32,0.04)] lg:block">
+        <aside className="app-sidebar hidden w-72 shrink-0 rounded-3xl border p-5 lg:block">
           <div className="mb-8 flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-[var(--forest)] text-white">
+            <div className="brand-mark flex h-11 w-11 items-center justify-center rounded-2xl text-white">
               <NotebookPen size={22} />
             </div>
             <div>
@@ -582,13 +603,25 @@ function AppShell() {
           </div>
         </aside>
 
-        <main className="flex-1 rounded-[32px] border border-[var(--line)] bg-[var(--surface)] p-4 shadow-[0_18px_40px_rgba(37,40,32,0.04)] lg:p-6">
-          <div className="mb-5 flex flex-col gap-4 border-b border-[var(--line)] pb-5 lg:flex-row lg:items-center lg:justify-between">
+        <main className="workspace-main flex-1 rounded-[32px] border p-4 lg:p-6">
+          <nav aria-label="Main navigation" className="mobile-nav lg:hidden">
+            <NavLink to="/" end className={({ isActive }) => `mobile-nav-link ${isActive ? 'active' : ''}`}>
+              <BookOpenText size={17} /> Workspace
+            </NavLink>
+            <NavLink to="/library" className={({ isActive }) => `mobile-nav-link ${isActive ? 'active' : ''}`}>
+              <LibraryBig size={17} /> Library
+            </NavLink>
+            <NavLink to="/cloud" className={({ isActive }) => `mobile-nav-link ${isActive ? 'active' : ''}`}>
+              <BarChart3 size={17} /> Cloud
+            </NavLink>
+          </nav>
+
+          <div className="page-header mb-5 flex flex-col gap-4 border-b pb-5 lg:flex-row lg:items-center lg:justify-between">
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">AI-based notes summarization and quiz generation</p>
-              <h2 className="mt-2 text-3xl font-semibold text-[var(--charcoal)]">Study workspace</h2>
+              <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">{pageDescription}</p>
+              <h2 className="mt-2 text-2xl font-semibold tracking-tight text-[var(--charcoal)] sm:text-3xl">{pageTitle}</h2>
             </div>
-            <div className="flex gap-2">
+            <div className="flex gap-2 self-start lg:self-auto">
               <button type="button" className="secondary-button" onClick={handleSaveToLibrary}>
                 <Save size={16} /> Save
               </button>
@@ -599,11 +632,12 @@ function AppShell() {
           </div>
 
           {toast ? (
-            <div className="mb-6 rounded-2xl border border-[var(--forest)] bg-[var(--sage)] px-4 py-3 text-sm text-[var(--charcoal)]">
+            <div role="status" aria-live="polite" className="mb-6 rounded-2xl border border-[var(--forest)] bg-[var(--sage)] px-4 py-3 text-sm text-[var(--charcoal)]">
               {toast}
             </div>
           ) : null}
 
+          <div key={pathname} className="page-enter">
           <Routes>
             <Route
               path="/"
@@ -644,8 +678,8 @@ function AppShell() {
                             <Upload size={18} className="text-[var(--forest)]" />
                             <p className="text-sm font-medium">Upload PDF or TXT notes</p>
                           </div>
-                          <button type="button" className="secondary-button" onClick={() => fileInputRef.current?.click()}>
-                            {jobState.upload ? <LoaderCircle className="animate-spin" size={16} /> : 'Select file'}
+                          <button type="button" className="secondary-button" onClick={() => fileInputRef.current?.click()} disabled={jobState.upload}>
+                            {jobState.upload ? <><LoaderCircle className="animate-spin" size={16} /> Processing…</> : 'Select file'}
                           </button>
                         </div>
                         <input ref={fileInputRef} type="file" accept=".pdf,.txt,.png,.jpg,.jpeg" className="hidden" onChange={handleFileUpload} />
@@ -695,7 +729,7 @@ function AppShell() {
                         <div className="mt-4 rounded-2xl border border-[var(--line)] bg-white p-4">
                           <div className="mb-3 flex items-center justify-between">
                             <p className="text-sm font-medium">Preview</p>
-                            <button type="button" className="secondary-button small-button" onClick={() => navigator.clipboard.writeText(studySet.summary || activeSummary)}>
+                            <button type="button" className="secondary-button small-button" onClick={handleCopySummary}>
                               <Copy size={14} /> Copy
                             </button>
                           </div>
@@ -966,10 +1000,15 @@ function AppShell() {
                   onOpenSet={handleOpenStudySet}
                   onDelete={handleDeleteStudySet}
                   onRename={handleRenameStudySet}
+                  onCreateNew={() => {
+                    setStudySet(defaultStudySet());
+                    navigate('/');
+                  }}
                 />
               }
             />
           </Routes>
+          </div>
         </main>
       </div>
     </div>
@@ -1250,7 +1289,7 @@ function CloudOperationsPage({
   );
 }
 
-function LibraryPage({ library, onOpenSet, onDelete, onRename }) {
+function LibraryPage({ library, onOpenSet, onDelete, onRename, onCreateNew }) {
   const [query, setQuery] = useState('');
   const [sortMode, setSortMode] = useState('updated');
 
@@ -1291,7 +1330,7 @@ function LibraryPage({ library, onOpenSet, onDelete, onRename }) {
       {filteredSets.length ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {filteredSets.map((set) => (
-            <div key={set.id} className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+            <div key={set.id} className="library-card rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">{set.subject}</p>
@@ -1320,9 +1359,22 @@ function LibraryPage({ library, onOpenSet, onDelete, onRename }) {
             </div>
           ))}
         </div>
+      ) : library.length === 0 ? (
+        <div className="rounded-3xl border border-dashed border-[var(--line)] bg-[var(--paper)] p-8 text-center sm:p-12">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-[var(--sage)] text-[var(--forest)]">
+            <FolderArchive size={22} />
+          </div>
+          <h4 className="mt-4 text-lg font-semibold text-[var(--charcoal)]">Your library is ready for its first set</h4>
+          <p className="mx-auto mt-2 max-w-md text-sm text-[var(--muted)]">Create a study set in the workspace, then save it here to keep your notes, summaries, quizzes, and flashcards together.</p>
+          <button type="button" className="primary-button mt-5" onClick={onCreateNew}>
+            <Plus size={16} /> Create a study set
+          </button>
+        </div>
       ) : (
-        <div className="rounded-3xl border border-dashed border-[var(--line)] bg-[var(--paper)] p-12 text-center text-[var(--muted)]">
-          No saved resources match your search yet. Save a study set from the workspace to start building your library.
+        <div className="rounded-3xl border border-dashed border-[var(--line)] bg-[var(--paper)] p-8 text-center sm:p-12">
+          <Search className="mx-auto text-[var(--muted)]" size={22} />
+          <p className="mt-3 text-sm text-[var(--muted)]">No saved study sets match “{query}”. Try another title or subject.</p>
+          <button type="button" className="secondary-button mt-4" onClick={() => setQuery('')}>Clear search</button>
         </div>
       )}
     </div>
