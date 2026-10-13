@@ -1,5 +1,6 @@
 const LIBRARY_KEY = 'noteforge-library-v1';
 const ACTIVE_SET_KEY = 'noteforge-active-set-v1';
+const STORAGE_MODE_KEY = 'noteforge-storage-mode';
 
 export function safeJsonParse(value, fallback) {
   try {
@@ -7,6 +8,41 @@ export function safeJsonParse(value, fallback) {
   } catch {
     return fallback;
   }
+}
+
+export function getStorageMode() {
+  if (typeof window === 'undefined') {
+    return 'local';
+  }
+
+  return window.localStorage.getItem(STORAGE_MODE_KEY) || 'local';
+}
+
+export function setStorageMode(mode) {
+  if (typeof window === 'undefined') {
+    return mode;
+  }
+
+  const resolved = mode === 'cloud' ? 'cloud' : 'local';
+  window.localStorage.setItem(STORAGE_MODE_KEY, resolved);
+  return resolved;
+}
+
+export function migrateLegacyLibrary() {
+  const existing = loadLibrary();
+  if (!Array.isArray(existing) || existing.length === 0) {
+    return [];
+  }
+
+  const migrated = existing.map((entry) => ({
+    ...entry,
+    storageMode: entry.storageMode || getStorageMode(),
+    syncedAt: entry.syncedAt || null,
+    cloudStatus: entry.cloudStatus || 'pending',
+  }));
+
+  saveLibrary(migrated);
+  return migrated;
 }
 
 export function loadLibrary() {
@@ -26,21 +62,25 @@ export function saveLibrary(entries) {
   return entries;
 }
 
-export function persistActiveSet(studySet) {
+function getActiveSetKey(ownerId = 'local') {
+  return ownerId === 'local' ? ACTIVE_SET_KEY : `${ACTIVE_SET_KEY}:${ownerId}`;
+}
+
+export function persistActiveSet(studySet, ownerId = 'local') {
   if (typeof window === 'undefined') {
     return studySet;
   }
 
-  window.localStorage.setItem(ACTIVE_SET_KEY, JSON.stringify(studySet));
+  window.localStorage.setItem(getActiveSetKey(ownerId), JSON.stringify(studySet));
   return studySet;
 }
 
-export function loadActiveSet() {
+export function loadActiveSet(ownerId = 'local') {
   if (typeof window === 'undefined') {
     return null;
   }
 
-  return safeJsonParse(window.localStorage.getItem(ACTIVE_SET_KEY), null);
+  return safeJsonParse(window.localStorage.getItem(getActiveSetKey(ownerId)), null);
 }
 
 export function upsertStudySet(studySet) {

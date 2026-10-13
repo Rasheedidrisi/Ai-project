@@ -5,6 +5,7 @@ import {
   generateFlashcardsRequest,
   generateQuizRequest,
   generateSummaryRequest,
+  getCloudStatus,
   uploadDocument,
 } from './utils/api';
 import {
@@ -12,9 +13,23 @@ import {
   loadActiveSet,
   loadLibrary,
   persistActiveSet,
-  renameStudySet,
-  upsertStudySet,
+  saveLibrary,
 } from './utils/storage';
+import {
+  createCloudProcessingRecord,
+  finishCloudProcessingRecord,
+  deleteCloudDocument,
+  deleteCloudStudySet,
+  loadCloudDocuments,
+  loadCloudProcessingMetrics,
+  loadCloudStudySets,
+  mergeStudySets,
+  getSupabaseClient,
+  supabaseConfigured,
+  updateCloudDocumentStatus,
+  uploadCloudDocument,
+  upsertCloudStudySets,
+} from './supabase';
 
 const SAMPLE_SOURCE = `Machine learning is a branch of artificial intelligence that enables systems to learn patterns from data.\n\nSupervised learning uses labeled inputs to train a model. In classification, the goal is to predict a category such as spam or not spam. In regression, the goal is to predict a continuous value such as house price.\n\nUnsupervised learning finds structure in unlabeled data through clustering and dimensionality reduction.\n\nA model must be trained carefully to generalize to new examples. Overfitting happens when a model memorizes the training data instead of learning general patterns. Regularization, validation, and cross-validation help reduce overfitting.`;
 
@@ -79,15 +94,141 @@ function AppShell() {
   const [library, setLibrary] = useState(() => loadLibrary());
   const [toast, setToast] = useState('');
   const [jobState, setJobState] = useState({ summary: false, quiz: false, flashcards: false, upload: false });
+  const [cloudStatus, setCloudStatus] = useState({ mode: 'local', enabled: false, metrics: {} });
+  const [cloudMetrics, setCloudMetrics] = useState(null);
+  const [cloudDocuments, setCloudDocuments] = useState([]);
+  const [cloudUser, setCloudUser] = useState(null);
+  const [authReady, setAuthReady] = useState(() => !supabaseConfigured);
+  const [cloudSyncState, setCloudSyncState] = useState({ loading: false, error: '' });
   const [quizSession, setQuizSession] = useState({ currentIndex: 0, answers: {}, submitted: false, score: null, percentage: null, weakTopics: [], resultShown: false });
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [flashcardFlipped, setFlashcardFlipped] = useState(false);
   const [fileStatus, setFileStatus] = useState('');
   const fileInputRef = useRef(null);
+  const activeSetOwnerRef = useRef('local');
 
   useEffect(() => {
-    persistActiveSet(studySet);
-  }, [studySet]);
+    if (!authReady) return;
+    const ownerId = cloudUser?.id || 'local';
+    if (activeSetOwnerRef.current !== ownerId) {
+      activeSetOwnerRef.current = ownerId;
+      return;
+    }
+    persistActiveSet(studySet, ownerId);
+  }, [studySet, cloudUser?.id, authReady]);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function refreshCloudStatus() {
+      try {
+        const status = await getCloudStatus();
+        if (isMounted) {
+          setCloudStatus(status);
+        }
+      } catch {
+        if (isMounted) {
+          setCloudStatus({ mode: 'local', enabled: false, metrics: {} });
+        }
+      }
+    }
+
+    refreshCloudStatus();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!supabaseConfigured) {
+      return undefined;
+    }
+
+    let isMounted = true;
+    let unsubscribe = () => {};
+    const applySession = (session, sessionError = '') => {
+      setCloudUser(session?.user || null);
+      setAuthReady(true);
+      setCloudSyncState({ loading: false, error: sessionError });
+      if (session?.user) {
+        setLibrary([]);
+        setStudySet(loadActiveSet(session.user.id) || defaultStudySet());
+      } else {
+        setLibrary(loadLibrary());
+        setStudySet(loadActiveSet() || defaultStudySet());
+      }
+    };
+
+    getSupabaseClient().then(async (supabase) => {
+      if (!isMounted || !supabase) return;
+      const { data: authListener } = supabase.auth.onAuthStateChange((_event, session) => {
+        applySession(session);
+      });
+      unsubscribe = () => authListener.subscription.unsubscribe();
+      const { data, error } = await supabase.auth.getSession();
+      if (isMounted) applySession(data.session, error?.message || '');
+    }).catch((error) => {
+      if (isMounted) {
+        applySession(null, error.message || 'Could not read Supabase session.');
+      }
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    let isMounted = true;
+
+    async function loadSignedInLibrary() {
+      if (!cloudUser) {
+        setCloudMetrics(null);
+        setCloudDocuments([]);
+        return;
+      }
+
+      setCloudSyncState({ loading: true, error: '' });
+      try {
+        const cloudEntries = await loadCloudStudySets(cloudUser.id);
+        if (isMounted) {
+          setLibrary(cloudEntries);
+          setStudySet(loadActiveSet(cloudUser.id) || cloudEntries[0] || defaultStudySet());
+          setCloudSyncState({ loading: false, error: '' });
+        }
+      } catch (error) {
+        if (isMounted) {
+          setLibrary([]);
+          setCloudSyncState({ loading: false, error: error.message || 'Cloud library could not be loaded.' });
+        }
+        return;
+      }
+
+      try {
+        const metrics = await loadCloudProcessingMetrics(cloudUser.id);
+        if (isMounted) setCloudMetrics(metrics);
+      } catch (error) {
+        if (isMounted) {
+          setCloudSyncState({ loading: false, error: error.message || 'Cloud processing history could not be loaded.' });
+        }
+      }
+
+      try {
+        const documents = await loadCloudDocuments(cloudUser.id);
+        if (isMounted) setCloudDocuments(documents);
+      } catch (error) {
+        if (isMounted) {
+          setCloudSyncState({ loading: false, error: error.message || 'Cloud documents could not be loaded.' });
+        }
+      }
+    }
+
+    loadSignedInLibrary();
+    return () => {
+      isMounted = false;
+    };
+  }, [cloudUser]);
 
   useEffect(() => {
     if (!toast) return undefined;
@@ -103,6 +244,39 @@ function AppShell() {
     setStudySet((current) => ({ ...current, [key]: value, updatedAt: Date.now() }));
   };
 
+  const beginCloudProcessingRecord = async (jobType) => {
+    if (!cloudUser) return null;
+    try {
+      return await createCloudProcessingRecord(cloudUser.id, jobType);
+    } catch (error) {
+      setCloudSyncState({ loading: false, error: error.message || 'Could not record cloud processing activity.' });
+      return null;
+    }
+  };
+
+  const endCloudProcessingRecord = async (jobId, status, errorCode = null) => {
+    if (!jobId) return;
+    try {
+      await finishCloudProcessingRecord(jobId, status, errorCode);
+      const metrics = await loadCloudProcessingMetrics(cloudUser.id);
+      setCloudMetrics(metrics);
+      setCloudDocuments(await loadCloudDocuments(cloudUser.id));
+    } catch (error) {
+      setCloudSyncState({ loading: false, error: error.message || 'Could not update cloud processing activity.' });
+    }
+  };
+
+  const handleDeleteCloudDocument = async (documentId) => {
+    if (!cloudUser) return;
+    try {
+      await deleteCloudDocument(cloudUser.id, documentId);
+      setCloudDocuments((current) => current.filter((document) => document.id !== documentId));
+      setToast('Private cloud document deleted.');
+    } catch (error) {
+      setCloudSyncState({ loading: false, error: error.message || 'Could not delete cloud document.' });
+    }
+  };
+
   const handleGenerateSummary = async () => {
     if (!studySet.sourceText.trim()) {
       setToast('Add study notes before generating a summary.');
@@ -110,6 +284,7 @@ function AppShell() {
     }
 
     setJobState((current) => ({ ...current, summary: true }));
+    const cloudJobId = await beginCloudProcessingRecord('summary');
     try {
       const result = await generateSummaryRequest({
         text: studySet.sourceText,
@@ -124,7 +299,9 @@ function AppShell() {
         updatedAt: Date.now(),
       }));
       setToast('Summary generated successfully.');
+      await endCloudProcessingRecord(cloudJobId, 'completed');
     } catch (error) {
+      await endCloudProcessingRecord(cloudJobId, 'failed', 'summary_generation_failed');
       setToast(error.message || 'Summary generation failed.');
     } finally {
       setJobState((current) => ({ ...current, summary: false }));
@@ -138,8 +315,20 @@ function AppShell() {
     setFileStatus(`Processing ${file.name}...`);
     setJobState((current) => ({ ...current, upload: true }));
 
+    let cloudDocument = null;
+    if (cloudUser) {
+      try {
+        cloudDocument = await uploadCloudDocument(file, cloudUser.id);
+      } catch (error) {
+        setCloudSyncState({ loading: false, error: error.message || 'Cloud document upload failed.' });
+        setToast(`Cloud copy failed; continuing with local extraction. ${error.message}`);
+      }
+    }
+
+    const cloudJobId = await beginCloudProcessingRecord('document-extraction');
     try {
       const result = await uploadDocument(file);
+      await updateCloudDocumentStatus(cloudUser?.id, cloudDocument?.id, 'extracted');
       setStudySet((current) => ({
         ...current,
         sourceText: result.text,
@@ -149,7 +338,16 @@ function AppShell() {
       }));
       setFileStatus(`Extracted ${result.fileName} and loaded the content.`);
       setToast('Document extracted successfully.');
+      await endCloudProcessingRecord(cloudJobId, 'completed');
     } catch (error) {
+      if (cloudDocument && cloudUser) {
+        try {
+          await updateCloudDocumentStatus(cloudUser.id, cloudDocument.id, 'extraction_failed');
+        } catch (statusError) {
+          setCloudSyncState({ loading: false, error: statusError.message || 'Could not update document status.' });
+        }
+      }
+      await endCloudProcessingRecord(cloudJobId, 'failed', 'document_extraction_failed');
       setFileStatus(error.message || 'Upload failed.');
       setToast(error.message || 'Upload failed.');
     } finally {
@@ -167,6 +365,7 @@ function AppShell() {
     }
 
     setJobState((current) => ({ ...current, quiz: true }));
+    const cloudJobId = await beginCloudProcessingRecord('quiz');
     try {
       const result = await generateQuizRequest({
         text: studySet.sourceText,
@@ -183,7 +382,9 @@ function AppShell() {
       }));
       setQuizSession({ currentIndex: 0, answers: {}, submitted: false, score: null, percentage: null, weakTopics: [], resultShown: false });
       setToast('Quiz generated successfully.');
+      await endCloudProcessingRecord(cloudJobId, 'completed');
     } catch (error) {
+      await endCloudProcessingRecord(cloudJobId, 'failed', 'quiz_generation_failed');
       setToast(error.message || 'Quiz generation failed.');
     } finally {
       setJobState((current) => ({ ...current, quiz: false }));
@@ -197,6 +398,7 @@ function AppShell() {
     }
 
     setJobState((current) => ({ ...current, flashcards: true }));
+    const cloudJobId = await beginCloudProcessingRecord('flashcards');
     try {
       const result = await generateFlashcardsRequest({ text: studySet.sourceText });
       setStudySet((current) => ({
@@ -208,38 +410,94 @@ function AppShell() {
       setFlashcardIndex(0);
       setFlashcardFlipped(false);
       setToast('Flashcards ready for review.');
+      await endCloudProcessingRecord(cloudJobId, 'completed');
     } catch (error) {
+      await endCloudProcessingRecord(cloudJobId, 'failed', 'flashcard_generation_failed');
       setToast(error.message || 'Flashcard generation failed.');
     } finally {
       setJobState((current) => ({ ...current, flashcards: false }));
     }
   };
 
-  const handleSaveToLibrary = () => {
+  const handleSaveToLibrary = async () => {
     const safeSet = {
       ...studySet,
       id: studySet.id || crypto.randomUUID(),
       updatedAt: Date.now(),
     };
 
-    const next = upsertStudySet(safeSet);
+    const next = [...library.filter((entry) => entry.id !== safeSet.id), safeSet];
+    if (cloudUser) {
+      try {
+        await upsertCloudStudySets(cloudUser.id, [safeSet]);
+        setLibrary(next);
+        setToast('Study set saved to your Supabase library.');
+      } catch (error) {
+        setLibrary(next);
+        setCloudSyncState({ loading: false, error: error.message });
+        setToast(`Saved in this session, but cloud sync failed: ${error.message}`);
+      }
+      return;
+    }
+
+    saveLibrary(next);
     setLibrary(next);
-    setToast('Study set saved to your library.');
+    setToast('Study set saved to your library on this device.');
   };
 
-  const handleDeleteStudySet = (id) => {
-    const remaining = deleteStudySet(id);
+  const handleDeleteStudySet = async (id) => {
+    if (cloudUser) {
+      try {
+        await deleteCloudStudySet(cloudUser.id, id);
+      } catch (error) {
+        setCloudSyncState({ loading: false, error: error.message });
+        setToast(error.message || 'Cloud study set could not be deleted.');
+        return;
+      }
+    }
+    const remaining = cloudUser
+      ? library.filter((entry) => entry.id !== id)
+      : deleteStudySet(id);
     setLibrary(remaining);
-    setToast('Study set deleted.');
+    setToast(cloudUser ? 'Study set deleted from your cloud library.' : 'Study set deleted.');
   };
 
-  const handleRenameStudySet = (id) => {
+  const handleRenameStudySet = async (id) => {
     const currentItem = library.find((item) => item.id === id);
     const nextTitle = window.prompt('Rename this study set', currentItem?.title || '');
     if (!nextTitle || !nextTitle.trim()) return;
-    const updated = renameStudySet(id, nextTitle.trim());
+    const updated = library.map((item) => (item.id === id ? { ...item, title: nextTitle.trim(), updatedAt: Date.now() } : item));
+    if (cloudUser) {
+      try {
+        const renamed = updated.find((item) => item.id === id);
+        await upsertCloudStudySets(cloudUser.id, [renamed]);
+      } catch (error) {
+        setCloudSyncState({ loading: false, error: error.message });
+        setToast(error.message || 'Cloud study set could not be renamed.');
+        return;
+      }
+    } else {
+      saveLibrary(updated);
+    }
     setLibrary(updated);
     setToast('Study set renamed.');
+  };
+
+  const handleImportLocalLibrary = async () => {
+    if (!cloudUser) return;
+
+    setCloudSyncState({ loading: true, error: '' });
+    try {
+      const localEntries = loadLibrary();
+      const cloudEntries = await loadCloudStudySets(cloudUser.id);
+      const mergedEntries = mergeStudySets(localEntries, cloudEntries);
+      await upsertCloudStudySets(cloudUser.id, mergedEntries);
+      setLibrary(mergedEntries);
+      setCloudSyncState({ loading: false, error: '' });
+      setToast(`Imported and merged ${localEntries.length} local study set(s). Newer cloud versions were kept.`);
+    } catch (error) {
+      setCloudSyncState({ loading: false, error: error.message || 'Could not import the local library.' });
+    }
   };
 
   const handleOpenStudySet = (set) => {
@@ -284,6 +542,9 @@ function AppShell() {
   const currentQuestion = studySet.quiz[quizSession.currentIndex];
   const currentFlashcard = studySet.flashcards[flashcardIndex];
 
+  const metrics = cloudStatus?.metrics || {};
+  const dashboardMetrics = cloudUser && cloudMetrics ? cloudMetrics : metrics;
+
   return (
     <div className="min-h-screen bg-[var(--paper)] text-[var(--charcoal)]">
       <div className="mx-auto flex max-w-[1600px] gap-6 px-4 py-6 lg:px-8">
@@ -304,6 +565,9 @@ function AppShell() {
             </NavLink>
             <NavLink to="/library" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
               <LibraryBig size={18} /> Library
+            </NavLink>
+            <NavLink to="/cloud" className={({ isActive }) => `nav-item ${isActive ? 'active' : ''}`}>
+              <BarChart3 size={18} /> Cloud operations
             </NavLink>
           </nav>
 
@@ -678,6 +942,23 @@ function AppShell() {
             />
 
             <Route
+              path="/cloud"
+              element={
+                <CloudOperationsPage
+                  cloudStatus={cloudStatus}
+                  metrics={dashboardMetrics}
+                  metricsArePersistent={Boolean(cloudUser && cloudMetrics)}
+                  documents={cloudDocuments}
+                  user={cloudUser}
+                  authReady={authReady}
+                  syncState={cloudSyncState}
+                  onImportLocalLibrary={handleImportLocalLibrary}
+                  onDeleteCloudDocument={handleDeleteCloudDocument}
+                />
+              }
+            />
+
+            <Route
               path="/library"
               element={
                 <LibraryPage
@@ -691,6 +972,280 @@ function AppShell() {
           </Routes>
         </main>
       </div>
+    </div>
+  );
+}
+
+function SupabaseAuthPanel({ user, authReady, syncState }) {
+  const [mode, setMode] = useState('sign-in');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [requestState, setRequestState] = useState({ loading: false, message: '', error: '' });
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+
+    setRequestState({ loading: true, message: '', error: '' });
+    try {
+      const supabase = await getSupabaseClient();
+      if (!supabase) {
+        setRequestState({ loading: false, message: '', error: 'Supabase configuration is missing.' });
+        return;
+      }
+      const result = mode === 'sign-in'
+        ? await supabase.auth.signInWithPassword({ email, password })
+        : await supabase.auth.signUp({ email, password });
+
+      if (result.error) {
+        setRequestState({ loading: false, message: '', error: result.error.message });
+        return;
+      }
+
+      setPassword('');
+      setRequestState({
+        loading: false,
+        message: mode === 'sign-up' && !result.data.session
+          ? 'Account created. Check your email to confirm it, then sign in.'
+          : 'Signed in successfully.',
+        error: '',
+      });
+    } catch (error) {
+      setRequestState({ loading: false, message: '', error: error.message || 'Supabase authentication failed.' });
+    }
+  };
+
+  const handleSignOut = async () => {
+    try {
+      const supabase = await getSupabaseClient();
+      if (!supabase) {
+        setRequestState({ loading: false, message: '', error: 'Supabase configuration is missing.' });
+        return;
+      }
+      const { error } = await supabase.auth.signOut();
+      if (error) {
+        setRequestState({ loading: false, message: '', error: error.message });
+        return;
+      }
+      setRequestState({ loading: false, message: 'Signed out.', error: '' });
+    } catch (error) {
+      setRequestState({ loading: false, message: '', error: error.message || 'Could not sign out.' });
+    }
+  };
+
+  if (!supabaseConfigured) {
+    return (
+      <section className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+        <h4 className="text-lg font-semibold text-[var(--charcoal)]">Connect Supabase</h4>
+        <p className="mt-2 text-sm text-[var(--muted)]">
+          Add <code>VITE_SUPABASE_URL</code> and <code>VITE_SUPABASE_ANON_KEY</code> to your local
+          <code> .env</code> file, then restart the dev server. Until then, study sets stay in this browser.
+        </p>
+      </section>
+    );
+  }
+
+  if (!authReady) {
+    return <p className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4 text-sm text-[var(--muted)]">Checking Supabase session…</p>;
+  }
+
+  return (
+    <section className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+      {user ? (
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h4 className="text-lg font-semibold text-[var(--charcoal)]">Supabase account</h4>
+            <p className="mt-1 text-sm text-[var(--muted)]">Signed in as {user.email}</p>
+            <p className="mt-1 text-xs text-[var(--muted)]">Your study library is isolated by Supabase Row Level Security.</p>
+          </div>
+          <button type="button" className="secondary-button" onClick={handleSignOut}>Sign out</button>
+        </div>
+      ) : (
+        <div className="grid gap-6 lg:grid-cols-[0.8fr_1.2fr]">
+          <div>
+            <h4 className="text-lg font-semibold text-[var(--charcoal)]">Sign in to sync your library</h4>
+            <p className="mt-2 text-sm text-[var(--muted)]">
+              Create a Supabase account or sign in to access your cloud-saved study sets on another device.
+              Local uploads and document processing remain on this app.
+            </p>
+          </div>
+          <form className="space-y-3" onSubmit={handleSubmit}>
+            <div className="flex gap-2">
+              <button type="button" className={mode === 'sign-in' ? 'primary-button' : 'secondary-button'} onClick={() => setMode('sign-in')}>Sign in</button>
+              <button type="button" className={mode === 'sign-up' ? 'primary-button' : 'secondary-button'} onClick={() => setMode('sign-up')}>Create account</button>
+            </div>
+            <label className="block text-sm font-medium text-[var(--charcoal)]">
+              Email
+              <input className="field mt-1 w-full" type="email" autoComplete="email" required value={email} onChange={(event) => setEmail(event.target.value)} />
+            </label>
+            <label className="block text-sm font-medium text-[var(--charcoal)]">
+              Password
+              <input className="field mt-1 w-full" type="password" autoComplete={mode === 'sign-in' ? 'current-password' : 'new-password'} minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} />
+            </label>
+            <button type="submit" className="primary-button" disabled={requestState.loading}>
+              {requestState.loading ? 'Please wait…' : mode === 'sign-in' ? 'Sign in' : 'Create account'}
+            </button>
+            {requestState.message ? <p className="text-sm text-[var(--forest)]">{requestState.message}</p> : null}
+            {requestState.error ? <p className="text-sm text-[#a13e32]">{requestState.error}</p> : null}
+          </form>
+        </div>
+      )}
+      {syncState?.loading ? <p className="mt-4 text-sm text-[var(--muted)]">Loading your cloud study library…</p> : null}
+      {syncState?.error ? <p role="alert" className="mt-4 text-sm text-[#a13e32]">{syncState.error}</p> : null}
+    </section>
+  );
+}
+
+function CloudOperationsPage({
+  cloudStatus,
+  metrics,
+  metricsArePersistent,
+  documents,
+  user,
+  authReady,
+  syncState,
+  onImportLocalLibrary,
+  onDeleteCloudDocument,
+}) {
+  const statusLabel = user ? 'Supabase library connected' : supabaseConfigured ? 'Supabase ready — sign-in required' : 'Local mode';
+
+  return (
+    <div className="space-y-6">
+      <div className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">Operations dashboard</p>
+            <h3 className="mt-2 text-2xl font-semibold text-[var(--charcoal)]">Cloud operations</h3>
+          </div>
+          <span className="rounded-full bg-[var(--sage)] px-3 py-1 text-xs font-medium uppercase tracking-[0.18em] text-[var(--forest)]">
+            {statusLabel}
+          </span>
+        </div>
+      </div>
+
+      <SupabaseAuthPanel user={user} authReady={authReady} syncState={syncState} />
+
+      {user ? (
+        <section className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h4 className="text-lg font-semibold text-[var(--charcoal)]">Move this device’s local study sets</h4>
+              <p className="mt-1 text-sm text-[var(--muted)]">Import is explicit. For matching IDs, the newer updated study set wins.</p>
+            </div>
+            <button type="button" className="secondary-button" onClick={onImportLocalLibrary} disabled={syncState?.loading}>
+              Import local library
+            </button>
+          </div>
+        </section>
+      ) : null}
+
+      {user ? (
+        <section className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+          <h4 className="text-lg font-semibold text-[var(--charcoal)]">Private document copies (optional)</h4>
+          <p className="mt-1 text-sm text-[var(--muted)]">When the Storage bucket is configured, originals are private to your account. Extraction still runs through the app API.</p>
+          {documents.length ? (
+            <ul className="mt-4 space-y-3">
+              {documents.map((document) => (
+                <li key={document.id} className="flex flex-col gap-3 rounded-2xl border border-[var(--line)] bg-white p-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <p className="font-medium text-[var(--charcoal)]">{document.original_name}</p>
+                    <p className="text-xs text-[var(--muted)]">
+                      {document.processing_status} · {(document.file_size / 1024).toFixed(1)} KB · {new Date(document.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <button type="button" className="secondary-button small-button" onClick={() => onDeleteCloudDocument(document.id)}>
+                    <Trash2 size={14} /> Delete file
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="mt-4 rounded-2xl border border-dashed border-[var(--line)] bg-white p-5 text-center text-sm text-[var(--muted)]">
+              No private cloud document copies yet. Signed-in uploads are copied here after the Storage setup SQL is run.
+            </p>
+          )}
+        </section>
+      ) : null}
+
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+        {[
+          [metricsArePersistent ? 'Recorded operations' : 'Local jobs', metrics.total ?? 0],
+          [metricsArePersistent ? 'In progress' : 'Queued', metricsArePersistent ? metrics.processing ?? 0 : metrics.queued ?? 0],
+          ['Completed', metrics.completed ?? 0],
+          ['Failed', metrics.failed ?? 0],
+          [metricsArePersistent ? 'Avg. duration (ms)' : 'Retry count', metricsArePersistent ? metrics.averageDurationMs ?? 0 : metrics.retryCount ?? 0],
+        ].map(([label, value]) => (
+          <div key={label} className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-4">
+            <p className="text-xs uppercase tracking-[0.18em] text-[var(--muted)]">{label}</p>
+            <p className="mt-3 text-3xl font-semibold text-[var(--charcoal)]">{value}</p>
+          </div>
+        ))}
+      </section>
+
+      <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+        <div className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+          <div className="flex items-center gap-2 text-[var(--forest)]">
+            <BarChart3 size={18} />
+            <h4 className="text-lg font-semibold">Processing health</h4>
+          </div>
+
+          <div className="mt-5 space-y-4">
+            <div>
+              <p className="text-sm text-[var(--muted)]">Average duration</p>
+              <p className="text-xl font-semibold text-[var(--charcoal)]">{metrics.averageDurationMs ?? 0} ms</p>
+            </div>
+            <div>
+              <p className="text-sm text-[var(--muted)]">Median duration</p>
+              <p className="text-xl font-semibold text-[var(--charcoal)]">{metrics.medianDurationMs ?? 0} ms</p>
+            </div>
+            <div>
+              <p className="text-sm text-[var(--muted)]">{metricsArePersistent ? 'Successful operations' : 'Retry count'}</p>
+              <p className="text-xl font-semibold text-[var(--charcoal)]">{metricsArePersistent ? metrics.completed ?? 0 : metrics.retryCount ?? 0}</p>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+          <div className="flex items-center gap-2 text-[var(--forest)]">
+            <Sparkles size={18} />
+            <h4 className="text-lg font-semibold">System status</h4>
+          </div>
+
+          <div className="mt-5 space-y-3 text-sm text-[var(--muted)]">
+            <p>Mode: <span className="font-medium text-[var(--charcoal)]">{cloudStatus?.mode || 'local'}</span></p>
+            <p>Provider: <span className="font-medium text-[var(--charcoal)]">{cloudStatus?.provider || 'local'}</span></p>
+            <p>Study library: <span className="font-medium text-[var(--charcoal)]">{user ? 'Supabase database' : 'local browser storage'}</span></p>
+            <p>Documents: <span className="font-medium text-[var(--charcoal)]">{user ? 'private Supabase copy when Storage is configured; extraction stays local/API' : 'local upload and extraction'}</span></p>
+            <p>Jobs: <span className="font-medium text-[var(--charcoal)]">{user ? 'persistent processing records; work runs synchronously' : 'in-memory tracking; no managed queue'}</span></p>
+          </div>
+        </div>
+      </section>
+
+      <p className="rounded-2xl border border-[var(--line)] bg-[var(--paper)] p-4 text-sm text-[var(--muted)]">
+        {metricsArePersistent
+          ? 'These are per-account Supabase records for synchronous app operations, not a managed queue or infrastructure telemetry.'
+          : 'Local job counters reset when the API restarts. A persistent account-level activity log appears after signing in and configuring its table.'}
+      </p>
+
+      {metrics.recentErrors?.length ? (
+        <div className="rounded-3xl border border-[var(--line)] bg-[var(--paper)] p-5">
+          <div className="flex items-center gap-2 text-[var(--forest)]">
+            <XCircle size={18} />
+            <h4 className="text-lg font-semibold">Recent local errors</h4>
+          </div>
+          <ul className="mt-4 space-y-3 text-sm text-[var(--muted)]">
+            {metrics.recentErrors.map((item) => (
+              <li key={item.id} className="rounded-2xl border border-[var(--line)] bg-white p-3">
+                <p className="font-medium text-[var(--charcoal)]">{item.type}</p>
+                <p>{item.error}</p>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <div className="rounded-3xl border border-dashed border-[var(--line)] bg-[var(--paper)] p-8 text-center text-sm text-[var(--muted)]">
+          No processing errors have been recorded yet. This does not indicate managed queue health.
+        </div>
+      )}
     </div>
   );
 }

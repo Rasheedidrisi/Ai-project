@@ -4,6 +4,8 @@ import multer from 'multer';
 import dotenv from 'dotenv';
 import { generateSummary, generateQuiz, generateFlashcards } from './aiService.js';
 import { extractTextFromFile } from './documentService.js';
+import { getCloudConfig } from './cloudConfig.js';
+import { createProcessingJob, getJob, getJobMetrics, getJobs, retryJob } from './jobStore.js';
 
 dotenv.config();
 
@@ -32,7 +34,64 @@ app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', app: 'NoteForge AI' });
+  res.json({
+    status: 'ok',
+    app: 'NoteForge AI',
+    cloud: getCloudConfig(),
+  });
+});
+
+app.get('/api/cloud/status', (_req, res) => {
+  res.json({
+    ...getCloudConfig(),
+    metrics: getJobMetrics(),
+  });
+});
+
+app.get('/api/jobs', (_req, res) => {
+  res.json({ jobs: getJobs() });
+});
+
+app.post('/api/jobs', (req, res) => {
+  const { type, ownerId, idempotencyKey, metadata = {} } = req.body || {};
+  if (!type) {
+    return res.status(400).json({ error: 'A job type is required.' });
+  }
+
+  const job = createProcessingJob({
+    type,
+    ownerId: ownerId || 'demo-user',
+    request: metadata,
+    idempotencyKey,
+  });
+
+  return res.status(202).json({
+    jobId: job.id,
+    status: job.status,
+    message: 'Processing job accepted and queued.',
+  });
+});
+
+app.get('/api/jobs/:jobId', (req, res) => {
+  const job = getJob(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found.' });
+  }
+
+  return res.json(job);
+});
+
+app.post('/api/jobs/:jobId/retry', (req, res) => {
+  const job = retryJob(req.params.jobId);
+  if (!job) {
+    return res.status(404).json({ error: 'Job not found.' });
+  }
+
+  return res.json({
+    jobId: job.id,
+    status: job.status,
+    message: 'Job returned to the queue for retry.',
+  });
 });
 
 app.post('/api/extract-text', upload.single('file'), async (req, res, next) => {
@@ -90,4 +149,5 @@ app.use((error, _req, res, _next) => {
 
 app.listen(port, () => {
   console.log(`NoteForge AI server running on http://localhost:${port}`);
+  console.log(`Cloud config: ${getCloudConfig().mode} mode`);
 });

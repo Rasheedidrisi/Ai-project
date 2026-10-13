@@ -1,6 +1,13 @@
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import { createCanvas } from '@napi-rs/canvas';
 import Tesseract, { createWorker } from 'tesseract.js';
+
+const require = createRequire(import.meta.url);
+pdfjsLib.GlobalWorkerOptions.workerSrc = pathToFileURL(
+  require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs'),
+).href;
 
 function cleanText(text) {
   return String(text || '')

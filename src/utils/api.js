@@ -34,6 +34,21 @@ export async function uploadDocument(file) {
   return payload;
 }
 
+export async function getCloudStatus() {
+  return apiRequest('/api/cloud/status');
+}
+
+export async function createProcessingJob(payload) {
+  return apiRequest('/api/jobs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getProcessingJob(jobId) {
+  return apiRequest(`/api/jobs/${jobId}`);
+}
+
 export async function generateSummaryRequest(payload) {
   return apiRequest('/api/generate-summary', {
     method: 'POST',
